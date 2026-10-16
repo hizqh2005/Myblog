@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>我的博客</title>
+  <link rel="icon" href="icon.jpg">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body class="home-page">
+  <header class="home-header">
+    <img class="avatar" src="icon.jpg" alt="头像">
+    <div class="motto">千里之行始于足下</div>
+    <button type="button" id="btn-tree-toggle">目录</button>
+  </header>
+
+  <main class="home-main">
+    <aside class="tree-panel" id="tree-panel">
+      <div class="tree-title">目录</div>
+      <div id="tree-root"></div>
+    </aside>
+
+    <section class="feed-panel">
+      <div class="feed-head">
+        <h1>全部文章</h1>
+        <div class="jump-year">
+          <button type="button" id="btn-jump">跳年 ▾</button>
+          <ul class="year-menu" id="year-menu" hidden></ul>
+        </div>
+      </div>
+      <div id="feed-root"></div>
+    </section>
+  </main>
+
+  <footer class="home-footer">©2026</footer>
+
+  <script src="js/markdown.js"></script>
+  <script src="js/store.js"></script>
+  <script>
+    function formatDate(ts) {
+      var d = new Date(ts);
+      var pad = function (n) { return String(n).padStart(2, '0'); };
+      return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+    }
+
+    function escapeHtml(text) {
+      return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    /* Windows lnk 式文章节点图标 */
+    var LNK_ICON =
+      '<svg class="lnk-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">' +
+      '<path d="M3.5 1.5h5.5l3.5 3.5v9.5h-9z" fill="#fff" stroke="#9aa0a6"/>' +
+      '<path d="M9 1.5V5h3.5" fill="#eef0f2" stroke="#9aa0a6"/>' +
+      '<path d="M3 13.5c2.5-4.5 6-5.5 9-3.5" fill="none" stroke="#0969da" stroke-width="1.6"/>' +
+      '<path d="M9.5 8.5l2.8 1.2-.7 2.9" fill="none" stroke="#0969da" stroke-width="1.6"/>' +
+      '</svg>';
+
+    /* ---------- 展开状态记忆 ---------- */
+    function loadOpenIds() {
+      try {
+        var arr = JSON.parse(localStorage.getItem('blog_tree_open'));
+        return new Set(Array.isArray(arr) ? arr : []);
+      } catch (e) {
+        return new Set();
+      }
+    }
+
+    function saveOpenIds(openIds) {
+      localStorage.setItem('blog_tree_open', JSON.stringify(Array.from(openIds)));
+    }
+
+    /* ---------- 左树 ---------- */
+    function buildTree(folders, posts) {
+      var byId = {};
+      var roots = [];
+      folders.forEach(function (f) {
+        f.children = [];
+        f.posts = [];
+        byId[f.id] = f;
+      });
+      folders.forEach(function (f) {
+        if (f.parent_id != null && byId[f.parent_id]) {
+          byId[f.parent_id].children.push(f);
+        } else {
+          roots.push(f);
+        }
+      });
+      posts.forEach(function (p) {
+        if (p.folder_id != null && byId[p.folder_id]) {
+          byId[p.folder_id].posts.push(p);
+        }
+      });
+      return roots;
+    }
+
+    function renderTree(roots, openIds) {
+      var root = document.getElementById('tree-root');
+      if (roots.length === 0) {
+        root.innerHTML = '<div class="empty-tip">暂无文件夹</div>';
+        return;
+      }
+      root.innerHTML = renderTreeNodes(roots, openIds, 0);
+
+      root.addEventListener('click', function (e) {
+        var folderRow = e.target.closest('.tree-folder');
+        if (folderRow) {
+          var id = Number(folderRow.dataset.id);
+          if (openIds.has(id)) openIds.delete(id);
+          else openIds.add(id);
+          saveOpenIds(openIds);
+          var open = openIds.has(id);
+          folderRow.classList.toggle('open');
+          folderRow.querySelector('.chevron').textContent = open ? '▾' : '▸';
+          var box = root.querySelector('[data-children="' + id + '"]');
+          if (box) box.hidden = !open;
+        }
+      });
+    }
+
+    function renderTreeNodes(nodes, openIds, depth) {
+      var html = '<ul class="tree-list" style="padding-left:' + (depth * 16) + 'px">';
+      nodes.forEach(function (f) {
+        var open = openIds.has(f.id);
+        html += '<li>' +
+          '<div class="tree-folder' + (open ? ' open' : '') + '" data-id="' + f.id + '">' +
+          '<span class="chevron">' + (open ? '▾' : '▸') + '</span>' +
+          '<span class="folder-name">' + escapeHtml(f.name) + '</span>' +
+          '</div>' +
+          '<div data-children="' + f.id + '"' + (open ? '' : ' hidden') + '>' +
+          renderTreeNodes(f.children, openIds, depth + 1) +
+          renderTreePosts(f.posts) +
+          '</div>' +
+          '</li>';
+      });
+      return html + '</ul>';
+    }
+
+    function renderTreePosts(posts) {
+      return posts.map(function (p) {
+        return '<a class="tree-post lnk" href="post.html?id=' + p.id + '" target="_blank" rel="noopener">' +
+          LNK_ICON +
+          '<span>' + escapeHtml(p.title) + '</span>' +
+          '</a>';
+      }).join('');
+    }
+
+    /* ---------- 右信息流 ---------- */
+    function renderFeed(posts) {
+      var root = document.getElementById('feed-root');
+      if (posts.length === 0) {
+        root.innerHTML = '<div class="empty-tip">还没有文章,<a href="editor.html">写第一篇</a>吧。</div>';
+        renderYearMenu([]);
+        return;
+      }
+      var groups = [];
+      posts.forEach(function (p) {
+        var year = new Date(p.createdAt).getFullYear();
+        var last = groups[groups.length - 1];
+        if (!last || last.year !== year) {
+          last = { year: year, posts: [] };
+          groups.push(last);
+        }
+        last.posts.push(p);
+      });
+
+      root.innerHTML = groups.map(function (g) {
+        return '<h2 class="feed-year" id="year-' + g.year + '">' + g.year + ' 年</h2>' +
+          g.posts.map(function (p) {
+            return '<a class="feed-item" href="post.html?id=' + p.id + '" target="_blank" rel="noopener">' +
+              '<span class="feed-title">' + escapeHtml(p.title) + '</span>' +
+              '<span class="feed-date">' + formatDate(p.createdAt) + '</span>' +
+              '</a>';
+          }).join('');
+      }).join('');
+
+      renderYearMenu(groups.map(function (g) { return g.year; }));
+    }
+
+    function renderYearMenu(years) {
+      var menu = document.getElementById('year-menu');
+      menu.innerHTML = years.map(function (y) {
+        return '<li><button type="button" data-year="' + y + '">' + y + ' 年</button></li>';
+      }).join('') || '<li class="year-empty">暂无年份</li>';
+    }
+
+    /* ---------- 启动 ---------- */
+    var openIds = loadOpenIds();
+
+    Promise.all([store.folders.list(), store.list()])
+      .then(function (data) {
+        renderTree(buildTree(data[0], data[1]), openIds);
+        renderFeed(data[1]);
+      })
+      .catch(function (e) {
+        document.getElementById('feed-root').innerHTML =
+          '<div class="empty-tip">加载失败:' + escapeHtml(e.message) + '</div>';
+      });
+
+    var btnJump = document.getElementById('btn-jump');
+    var yearMenu = document.getElementById('year-menu');
+    btnJump.addEventListener('click', function () {
+      yearMenu.hidden = !yearMenu.hidden;
+    });
+    yearMenu.addEventListener('click', function (e) {
+      var btn = e.target.closest('button[data-year]');
+      if (!btn) return;
+      var heading = document.getElementById('year-' + btn.dataset.year);
+      if (heading) {
+        window.scrollTo({ top: heading.offsetTop - 16, behavior: 'smooth' });
+      }
+      yearMenu.hidden = true;
+    });
+    document.addEventListener('click', function (e) {
+      if (!e.target.closest('.jump-year')) yearMenu.hidden = true;
+    });
+
+    document.getElementById('btn-tree-toggle').addEventListener('click', function () {
+      document.body.classList.toggle('tree-open');
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>管理 - 我的博客</title>
+  <link rel="icon" href="icon.jpg">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body class="editor-page">
+  <!-- 口令门 -->
+  <div class="gate" id="gate">
+    <form class="gate-box" id="gate-form">
+      <h1>知识库管理</h1>
+      <input type="password" id="password-input" placeholder="输入口令" autocomplete="current-password">
+      <button type="submit" class="primary">进入</button>
+      <div class="gate-error" id="gate-error"></div>
+    </form>
+  </div>
+
+  <!-- 管理窗口 -->
+  <div class="manage-view" id="manage-view" hidden>
+    <header class="manage-header">
+      <div class="site-title"><a href="./" target="_blank" rel="noopener">我的博客</a> · 管理</div>
+      <div class="manage-tools">
+        <button type="button" id="btn-new-root-folder">新建文件夹</button>
+        <button type="button" id="btn-logout">退出</button>
+      </div>
+    </header>
+
+    <div class="manage-layout">
+      <aside class="manage-tree-panel">
+        <div class="tree-title">目录</div>
+        <div id="manage-tree"></div>
+      </aside>
+
+      <section class="manage-list-panel">
+        <div class="list-toolbar">
+          <input type="text" id="search-input" placeholder="按标题搜索…">
+          <div class="scope-switch" id="scope-switch">
+            <button type="button" data-scope="current">当前文件夹</button>
+            <button type="button" data-scope="all" class="active">全部</button>
+            <button type="button" data-scope="none">未分类</button>
+          </div>
+          <button type="button" id="btn-new-post">新建文章</button>
+          <button type="button" id="btn-cleanup">清理未引用图片</button>
+        </div>
+        <div id="post-list"></div>
+      </section>
+    </div>
+  </div>
+
+  <!-- 写作窗口 -->
+  <div class="write-view" id="write-view" hidden>
+    <div class="write-toolbar">
+      <button type="button" id="btn-back">← 返回管理</button>
+      <input type="text" id="title-input" placeholder="文章标题" maxlength="100">
+      <button type="button" id="btn-import">导入图片</button>
+      <input type="file" id="import-input" accept="image/*" multiple hidden>
+      <button type="button" id="btn-save" class="primary">保存</button>
+    </div>
+    <div class="editor-layout">
+      <textarea id="content-input" placeholder="Markdown 内容…"></textarea>
+      <div class="preview">
+        <div class="preview-label">预览</div>
+        <div class="markdown-body" id="preview-body"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 移动对话框 -->
+  <div class="modal" id="move-modal" hidden>
+    <div class="modal-box">
+      <h3 id="move-title">移动到…</h3>
+      <select id="move-select"></select>
+      <div class="modal-actions">
+        <button type="button" id="move-cancel">取消</button>
+        <button type="button" id="move-ok" class="primary">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/markdown.js"></script>
+  <script src="js/store.js"></script>
+  <script>
+    function formatDate(ts) {
+      var d = new Date(ts);
+      var pad = function (n) { return String(n).padStart(2, '0'); };
+      return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+    }
+
+    function escapeHtml(text) {
+      return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    /* ---------- 全局状态 ---------- */
+    var state = {
+      folders: [],
+      posts: [],
+      openIds: new Set(),
+      currentFolderId: null,
+      scope: 'all',
+      search: '',
+      editing: null,
+      dirty: false
+    };
+
+    try {
+      var saved = JSON.parse(localStorage.getItem('blog_editor_tree_open'));
+      state.openIds = new Set(Array.isArray(saved) ? saved : []);
+    } catch (e) { /* 忽略坏数据 */ }
+
+    var gateEl = document.getElementById('gate');
+    var manageEl = document.getElementById('manage-view');
+    var writeEl = document.getElementById('write-view');
+    var pendingPostId = new URLSearchParams(location.search).get('id');
+
+    function showView(name) {
+      gateEl.hidden = name !== 'gate';
+      manageEl.hidden = name !== 'manage';
+      writeEl.hidden = name !== 'write';
+      document.title = (name === 'write' ? '写作' : name === 'manage' ? '管理' : '登录') + ' - 我的博客';
+    }
+
+    /* ---------- 数据刷新 ---------- */
+    function refresh() {
+      return Promise.all([store.folders.list(), store.list()]).then(function (data) {
+        state.folders = data[0];
+        state.posts = data[1];
+        renderManageTree();
+        renderPostList();
+      });
+    }
+
+    /* ---------- 管理窗口:左树 ---------- */
+    function buildTree(folders) {
+      var byId = {};
+      var roots = [];
+      folders.forEach(function (f) { f.children = []; byId[f.id] = f; });
+      folders.forEach(function (f) {
+        if (f.parent_id != null && byId[f.parent_id]) byId[f.parent_id].children.push(f);
+        else roots.push(f);
+      });
+      return roots;
+    }
+
+    function renderManageTree() {
+      var root = document.getElementById('manage-tree');
+      var roots = buildTree(state.folders);
+      if (roots.length === 0) {
+        root.innerHTML = '<div class="empty-tip">暂无文件夹</div>';
+        return;
+      }
+      root.innerHTML = renderNodes(roots, 0);
+    }
+
+    function renderNodes(nodes, depth) {
+      return '<ul class="tree-list" style="padding-left:' + (depth * 14) + 'px">' +
+        nodes.map(function (f) {
+          var open = state.openIds.has(f.id);
+          return '<li>' +
+            '<div class="tree-row' + (state.currentFolderId === f.id ? ' selected' : '') + '" data-id="' + f.id + '">' +
+            '<span class="chevron" data-act="toggle">' + (open ? '▾' : '▸') + '</span>' +
+            '<span class="folder-name" data-act="select">' + escapeHtml(f.name) + '</span>' +
+            '<span class="row-actions">' +
+            '<button type="button" data-act="new-folder" title="新建子文件夹">＋夹</button>' +
+            '<button type="button" data-act="new-post" title="新建文章">＋文</button>' +
+            '<button type="button" data-act="rename" title="重命名">改名</button>' +
+            '<button type="button" data-act="move" title="移动">移动</button>' +
+            '<button type="button" data-act="delete" title="删除">删除</button>' +
+            '</span>' +
+            '</div>' +
+            (open ? renderNodes(f.children, depth + 1) : '') +
+            '</li>';
+        }).join('') + '</ul>';
+    }
+
+    function countSubtreePosts(folderId) {
+      var ids = [folderId];
+      for (var changed = true; changed;) {
+        changed = false;
+        state.folders.forEach(function (f) {
+          if (ids.indexOf(f.parent_id) !== -1 && ids.indexOf(f.id) === -1) {
+            ids.push(f.id);
+            changed = true;
+          }
+        });
+      }
+      return state.posts.filter(function (p) {
+        return ids.indexOf(p.folder_id) !== -1;
+      }).length;
+    }
+
+    document.getElementById('manage-tree').addEventListener('click', function (e) {
+      var row = e.target.closest('.tree-row');
+      if (!row) return;
+      var id = Number(row.dataset.id);
+      var act = e.target.dataset.act || 'select';
+
+      if (act === 'toggle') {
+        if (state.openIds.has(id)) state.openIds.delete(id);
+        else state.openIds.add(id);
+        localStorage.setItem('blog_editor_tree_open', JSON.stringify(Array.from(state.openIds)));
+        renderManageTree();
+      } else if (act === 'select') {
+        state.currentFolderId = id;
+        state.scope = 'current';
+        renderManageTree();
+        renderPostList();
+      } else if (act === 'new-folder') {
+        var name = prompt('新文件夹名称:');
+        if (!name || !name.trim()) return;
+        store.folders.create(name.trim(), id).then(function () {
+          state.openIds.add(id);
+          return refresh();
+        }).catch(showError);
+      } else if (act === 'new-post') {
+        openWrite({ folder_id: id });
+      } else if (act === 'rename') {
+        var folder = state.folders.find(function (f) { return f.id === id; });
+        var newName = prompt('新名称:', folder ? folder.name : '');
+        if (!newName || !newName.trim()) return;
+        store.folders.update(id, { name: newName.trim() }).then(refresh).catch(showError);
+      } else if (act === 'move') {
+        openMoveModal('folder', id);
+      } else if (act === 'delete') {
+        var n = countSubtreePosts(id);
+        var f = state.folders.find(function (x) { return x.id === id; });
+        if (confirm('删除文件夹「' + (f ? f.name : id) + '」,含 ' + n + ' 篇文章,不可恢复。确定?')) {
+          store.folders.remove(id).then(function () {
+            if (state.currentFolderId === id) state.currentFolderId = null;
+            return refresh();
+          }).catch(showError);
+        }
+      }
+    });
+
+    /* ---------- 管理窗口:右侧列表 ---------- */
+    function visiblePosts() {
+      var q = state.search.trim().toLowerCase();
+      return state.posts.filter(function (p) {
+        if (state.scope === 'current' && p.folder_id !== state.currentFolderId) return false;
+        if (state.scope === 'none' && p.folder_id !== null) return false;
+        if (q && p.title.toLowerCase().indexOf(q) === -1) return false;
+        return true;
+      });
+    }
+
+    function folderNameOf(id) {
+      if (id === null) return '未分类';
+      var f = state.folders.find(function (x) { return x.id === id; });
+      return f ? f.name : '未分类';
+    }
+
+    function renderPostList() {
+      var list = document.getElementById('post-list');
+      var posts = visiblePosts();
+
+      document.querySelectorAll('#scope-switch button').forEach(function (b) {
+        b.classList.toggle('active', b.dataset.scope === state.scope);
+      });
+
+      if (posts.length === 0) {
+        var tip = state.scope === 'current' && state.currentFolderId === null
+          ? '先在左侧选择文件夹,或切换到「全部」。'
+          : '没有匹配的文章。';
+        list.innerHTML = '<div class="empty-tip">' + tip + '</div>';
+        return;
+      }
+      list.innerHTML = posts.map(function (p) {
+        return '<div class="list-item" data-id="' + p.id + '">' +
+          '<div class="list-item-main">' +
+          '<div class="list-item-title">' + escapeHtml(p.title) + '</div>' +
+          '<div class="list-item-meta">' + formatDate(p.createdAt) + ' · ' +
+          escapeHtml(folderNameOf(p.folder_id)) + '</div>' +
+          '</div>' +
+          '<div class="list-item-actions">' +
+          '<button type="button" data-act="edit">编辑</button>' +
+          '<button type="button" data-act="move-post">归入文件夹…</button>' +
+          '<button type="button" data-act="delete-post">删除</button>' +
+          '</div>' +
+          '</div>';
+      }).join('');
+    }
+
+    document.getElementById('search-input').addEventListener('input', function (e) {
+      state.search = e.target.value;
+      renderPostList();
+    });
+
+    document.getElementById('scope-switch').addEventListener('click', function (e) {
+      var btn = e.target.closest('button[data-scope]');
+      if (!btn) return;
+      state.scope = btn.dataset.scope;
+      renderPostList();
+    });
+
+    document.getElementById('post-list').addEventListener('click', function (e) {
+      var item = e.target.closest('.list-item');
+      if (!item) return;
+      var id = Number(item.dataset.id);
+      var post = state.posts.find(function (p) { return p.id === id; });
+      if (!post) return;
+      var act = e.target.dataset.act;
+
+      if (act === 'delete-post') {
+        if (confirm('确定删除《' + post.title + '》吗?此操作不可恢复。')) {
+          store.remove(id).then(refresh).catch(showError);
+        }
+      } else if (act === 'move-post') {
+        openMoveModal('post', id);
+      } else {
+        openWrite({ postId: id });
+      }
+    });
+
+    document.getElementById('btn-new-root-folder').addEventListener('click', function () {
+      var name = prompt('新文件夹名称:');
+      if (!name || !name.trim()) return;
+      store.folders.create(name.trim(), null).then(refresh).catch(showError);
+    });
+
+    document.getElementById('btn-new-post').addEventListener('click', function () {
+      var fid = state.scope === 'current' ? state.currentFolderId
+        : state.scope === 'none' ? null : state.currentFolderId;
+      openWrite({ folder_id: fid });
+    });
+
+    /* ---------- 移动对话框 ---------- */
+    var moveModal = document.getElementById('move-modal');
+    var moveSelect = document.getElementById('move-select');
+    var moveTarget = null;
+
+    function descendantsOf(id) {
+      var ids = [id];
+      for (var changed = true; changed;) {
+        changed = false;
+        state.folders.forEach(function (f) {
+          if (ids.indexOf(f.parent_id) !== -1 && ids.indexOf(f.id) === -1) {
+            ids.push(f.id);
+            changed = true;
+          }
+        });
+      }
+      return ids;
+    }
+
+    function folderOptions(excludeIds) {
+      function walk(nodes, depth) {
+        return nodes.map(function (f) {
+          return '<option value="' + f.id + '"' +
+            (excludeIds.indexOf(f.id) !== -1 ? ' disabled' : '') + '>' +
+            '　'.repeat(depth) + escapeHtml(f.name) + '</option>' +
+            walk(f.children, depth + 1);
+        }).join('');
+      }
+      return walk(buildTree(state.folders), 0);
+    }
+
+    function openMoveModal(kind, id) {
+      moveTarget = { kind: kind, id: id };
+      document.getElementById('move-title').textContent =
+        kind === 'folder' ? '移动文件夹到…' : '文章归入文件夹…';
+      var exclude = kind === 'folder' ? descendantsOf(id) : [];
+      moveSelect.innerHTML =
+        '<option value="">' + (kind === 'folder' ? '根目录' : '未分类') + '</option>' +
+        folderOptions(exclude);
+      var current = kind === 'folder'
+        ? (state.folders.find(function (f) { return f.id === id; }) || {}).parent_id
+        : (state.posts.find(function (p) { return p.id === id; }) || {}).folder_id;
+      moveSelect.value = current == null ? '' : String(current);
+      moveModal.hidden = false;
+    }
+
+    document.getElementById('move-cancel').addEventListener('click', function () {
+      moveModal.hidden = true;
+      moveTarget = null;
+    });
+
+    document.getElementById('move-ok').addEventListener('click', function () {
+      if (!moveTarget) return;
+      var dest = moveSelect.value === '' ? null : Number(moveSelect.value);
+      var action = moveTarget.kind === 'folder'
+        ? store.folders.update(moveTarget.id, { parent_id: dest })
+        : store.update(moveTarget.id, { folder_id: dest });
+      action.then(function () {
+        moveModal.hidden = true;
+        moveTarget = null;
+        return refresh();
+      }).catch(showError);
+    });
+
+    /* ---------- 写作窗口 ---------- */
+    var titleInput = document.getElementById('title-input');
+    var contentInput = document.getElementById('content-input');
+    var previewBody = document.getElementById('preview-body');
+
+    function openWrite(editing) {
+      state.editing = editing;
+      state.dirty = false;
+      if (editing.postId) {
+        var post = state.posts.find(function (p) { return p.id === editing.postId; });
+        if (!post) { showError(new Error('文章不存在')); return; }
+        titleInput.value = post.title;
+        contentInput.value = post.content;
+      } else {
+        titleInput.value = '';
+        contentInput.value = '';
+      }
+      previewBody.innerHTML = markdown.toHtml(contentInput.value);
+      showView('write');
+      titleInput.focus();
+    }
+
+    function renderPreview() {
+      previewBody.innerHTML = markdown.toHtml(contentInput.value);
+    }
+
+    contentInput.addEventListener('input', function () {
+      state.dirty = true;
+      renderPreview();
+    });
+    titleInput.addEventListener('input', function () {
+      state.dirty = true;
+    });
+
+    function save() {
+      var title = titleInput.value.trim();
+      var content = contentInput.value;
+      if (!title) {
+        alert('请填写文章标题');
+        titleInput.focus();
+        return;
+      }
+      var action = state.editing.postId
+        ? store.update(state.editing.postId, { title: title, content: content })
+        : store.create(title, content, state.editing.folder_id);
+      action.then(function () {
+        state.dirty = false;
+        return refresh();
+      }).then(function () {
+        showView('manage');
+      }).catch(showError);
+    }
+
+    document.getElementById('btn-save').addEventListener('click', save);
+
+    document.addEventListener('keydown', function (e) {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        if (!writeEl.hidden) save();
+      }
+    });
+
+    function backToManage() {
+      if (state.dirty && !confirm('有未保存的修改,确定离开?')) return;
+      state.dirty = false;
+      showView('manage');
+      renderPostList();
+    }
+
+    document.getElementById('btn-back').addEventListener('click', backToManage);
+
+    window.addEventListener('beforeunload', function (e) {
+      if (state.dirty) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    });
+
+    /* ---------- 图片链路 ---------- */
+    function insertAtCursor(text) {
+      var start = contentInput.selectionStart;
+      var end = contentInput.selectionEnd;
+      var value = contentInput.value;
+      contentInput.value = value.slice(0, start) + text + value.slice(end);
+      contentInput.selectionStart = contentInput.selectionEnd = start + text.length;
+      state.dirty = true;
+      renderPreview();
+    }
+
+    function uploadAndInsert(files) {
+      var list = Array.prototype.filter.call(files, function (f) {
+        return /^image\//.test(f.type);
+      });
+      if (list.length === 0) return;
+      list.reduce(function (chain, file) {
+        return chain.then(function () {
+          return store.upload(file).then(function (res) {
+            insertAtCursor('![](/images/' + res.url.replace('/images/', '') + ')');
+          });
+        });
+      }, Promise.resolve()).catch(showError);
+    }
+
+    contentInput.addEventListener('paste', function (e) {
+      var files = Array.prototype.filter.call(
+        (e.clipboardData || window.clipboardData).items || [],
+        function (item) { return item.kind === 'file'; }
+      ).map(function (item) { return item.getAsFile(); }).filter(Boolean);
+      if (files.length === 0) return;
+      e.preventDefault();
+      uploadAndInsert(files);
+    });
+
+    document.getElementById('btn-import').addEventListener('click', function () {
+      document.getElementById('import-input').click();
+    });
+
+    document.getElementById('import-input').addEventListener('change', function (e) {
+      if (e.target.files.length > 0) uploadAndInsert(e.target.files);
+      e.target.value = '';
+    });
+
+    document.getElementById('btn-cleanup').addEventListener('click', function () {
+      store.cleanupImages().then(function (res) {
+        alert('已清理 ' + res.removed + ' 张未引用图片');
+      }).catch(showError);
+    });
+
+    /* ---------- 口令门 ---------- */
+    function showError(err) {
+      alert(err.message || '操作失败');
+    }
+
+    document.getElementById('gate-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var errorEl = document.getElementById('gate-error');
+      var pw = document.getElementById('password-input').value;
+      errorEl.textContent = '';
+      store.session.login(pw).then(function () {
+        document.getElementById('password-input').value = '';
+        enterManage();
+      }).catch(function (err) {
+        errorEl.textContent = err.message || '登录失败';
+      });
+    });
+
+    document.getElementById('btn-logout').addEventListener('click', function () {
+      store.session.logout().then(function () {
+        showView('gate');
+      }).catch(showError);
+    });
+
+    function enterManage() {
+      refresh().then(function () {
+        showView('manage');
+        if (pendingPostId) {
+          var pid = Number(pendingPostId);
+          pendingPostId = null;
+          if (state.posts.some(function (p) { return p.id === pid; })) {
+            openWrite({ postId: pid });
+          } else {
+            alert('文章不存在');
+          }
+        }
+      }).catch(showError);
+    }
+
+    store.session.status().then(function (s) {
+      if (s.loggedIn) enterManage();
+      else showView('gate');
+    }).catch(function () {
+      showView('gate');
+    });
+  </script>
+</body>
+</html>
